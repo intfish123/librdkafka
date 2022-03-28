@@ -690,7 +690,7 @@ void rd_kafka_ListOffsetsRequest(rd_kafka_broker_t *rkb,
  * 'offsets' list.
  *
  * @param rkbuf response buffer, may be NULL if \p err is set.
- * @param update_toppar update toppar's committed_offset
+ * @param update_toppar update toppar's committed_offset and stored offset.
  * @param add_part if true add partitions from the response to \p *offsets,
  *                 else just update the partitions that are already
  *                 in \p *offsets.
@@ -803,6 +803,13 @@ rd_kafka_handle_OffsetFetch(rd_kafka_t *rk,
                                 /* Update toppar's committed offset */
                                 rd_kafka_toppar_lock(rktp);
                                 rktp->rktp_committed_offset = rktpar->offset;
+
+                                /* Update toppar's stored offset to INVALID.
+                                 * Reset the stored offset in rebalanced,
+                                 * so that it will not commit previous stored offset to broker, (issue #3745, #3710).
+                                 * And the codes in rdkafka_assignment.c -> rd_kafka_assignment_serve_removals() -> rd_kafka_offset_store0(rktp, RD_KAFKA_OFFSET_INVALID,RD_DONT_LOCK);
+                                 * can not fix the incorrect offset completely. */
+                                rktp->rktp_stored_offset = RD_KAFKA_OFFSET_INVALID;
                                 rd_kafka_toppar_unlock(rktp);
                         }
 

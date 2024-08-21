@@ -1,7 +1,8 @@
 /*
  * librdkafka - The Apache Kafka C/C++ library
  *
- * Copyright (c) 2019 Magnus Edenhill
+ * Copyright (c) 2019-2022, Magnus Edenhill
+ *               2023, Confluent Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -36,7 +37,7 @@
 #include <openssl/evp.h>
 #include "rdunittest.h"
 
-#if WITH_CURL
+#if WITH_OAUTHBEARER_OIDC
 #include "rdkafka_sasl_oauthbearer_oidc.h"
 #endif
 
@@ -442,7 +443,8 @@ rd_kafka_oauthbearer_set_token0(rd_kafka_t *rk,
         rd_kafka_dbg(rk, SECURITY, "BRKMAIN",
                      "Waking up waiting broker threads after "
                      "setting OAUTHBEARER token");
-        rd_kafka_all_brokers_wakeup(rk, RD_KAFKA_BROKER_STATE_TRY_CONNECT);
+        rd_kafka_all_brokers_wakeup(rk, RD_KAFKA_BROKER_STATE_TRY_CONNECT,
+                                    "OAUTHBEARER token update");
 
         return RD_KAFKA_RESP_ERR_NO_ERROR;
 }
@@ -1040,6 +1042,7 @@ static void rd_kafka_sasl_oauthbearer_close(rd_kafka_transport_t *rktrans) {
         rd_free(state->md_principal_name);
         rd_list_destroy(&state->extensions);
         rd_free(state);
+        rktrans->rktrans_sasl.state = NULL;
 }
 
 
@@ -1299,6 +1302,16 @@ static int rd_kafka_sasl_oauthbearer_init(rd_kafka_t *rk,
         rd_list_init(&handle->extensions, 0,
                      (void (*)(void *))rd_strtup_destroy);
 
+
+        if (rk->rk_conf.sasl.enable_callback_queue) {
+                /* SASL specific callback queue enabled */
+                rk->rk_sasl.callback_q = rd_kafka_q_new(rk);
+                handle->callback_q = rd_kafka_q_keep(rk->rk_sasl.callback_q);
+        } else {
+                /* Use main queue */
+                handle->callback_q = rd_kafka_q_keep(rk->rk_rep);
+        }
+
         rd_kafka_timer_start(
             &rk->rk_timers, &handle->token_refresh_tmr, 1 * 1000 * 1000,
             rd_kafka_sasl_oauthbearer_token_refresh_tmr_cb, rk);
@@ -1315,16 +1328,8 @@ static int rd_kafka_sasl_oauthbearer_init(rd_kafka_t *rk,
                 return 0;
         }
 
-        if (rk->rk_conf.sasl.enable_callback_queue) {
-                /* SASL specific callback queue enabled */
-                rk->rk_sasl.callback_q = rd_kafka_q_new(rk);
-                handle->callback_q = rd_kafka_q_keep(rk->rk_sasl.callback_q);
-        } else {
-                /* Use main queue */
-                handle->callback_q = rd_kafka_q_keep(rk->rk_rep);
-        }
 
-#if WITH_CURL
+#if WITH_OAUTHBEARER_OIDC
         if (rk->rk_conf.sasl.oauthbearer.method ==
                 RD_KAFKA_SASL_OAUTHBEARER_METHOD_OIDC &&
             rk->rk_conf.sasl.oauthbearer.token_refresh_cb ==

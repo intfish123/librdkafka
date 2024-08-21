@@ -10,8 +10,8 @@
 
 set -ex
 
-_DOCKER_IMAGE=fedora:35
-_MOCK_CONFIGS="centos+epel-7-x86_64 centos-stream+epel-8-x86_64"
+_DOCKER_IMAGE=rockylinux:9
+_MOCK_CONFIGS="rocky+epel-8-x86_64 rocky+epel-9-x86_64"
 
 if [[ $1 == "--build" ]]; then
     on_builder=1
@@ -59,7 +59,8 @@ else
     # Running in docker container.
     #
 
-    dnf install -y -q mock mock-core-configs make git
+    dnf install -y -q epel-release make git
+    dnf install -y -q mock mock-core-configs
 
     echo "%_netsharedpath /sys:/proc" >> /etc/rpm/macros.netshared
 
@@ -77,6 +78,9 @@ else
         echo "Building $MOCK_CONFIG in $PWD"
         cat $cfg_file
 
+        echo "Setting git safe.directory"
+        git config --global --add safe.directory /io
+
         export MOCK_CONFIG=$MOCK_CONFIG
         make all
 
@@ -90,5 +94,3 @@ else
     popd
     echo "Done"
 fi
-
-exit 0

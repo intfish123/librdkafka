@@ -1,7 +1,8 @@
 /*
  * librdkafka - Apache Kafka C library
  *
- * Copyright (c) 2012,2013 Magnus Edenhill
+ * Copyright (c) 2012-2022, Magnus Edenhill,
+ *               2023, Confluent Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -56,6 +57,15 @@ const char *rd_kafka_message_errstr(const rd_kafka_message_t *rkmessage) {
 
         return rd_kafka_err2str(rkmessage->err);
 }
+
+const char *
+rd_kafka_message_produce_errstr(const rd_kafka_message_t *rkmessage) {
+        if (!rkmessage->err)
+                return NULL;
+        rd_kafka_msg_t *rkm = (rd_kafka_msg_t *)rkmessage;
+        return rkm->rkm_u.producer.errstr;
+}
+
 
 
 /**
@@ -776,7 +786,7 @@ int rd_kafka_produce_batch(rd_kafka_topic_t *app_rkt,
                                                 continue;
                                         }
                                 }
-                                rd_kafka_toppar_enq_msg(rktp, rkm);
+                                rd_kafka_toppar_enq_msg(rktp, rkm, now);
 
                                 if (rd_kafka_is_transactional(rkt->rkt_rk)) {
                                         /* Add partition to transaction */
@@ -796,7 +806,7 @@ int rd_kafka_produce_batch(rd_kafka_topic_t *app_rkt,
 
                 } else {
                         /* Single destination partition. */
-                        rd_kafka_toppar_enq_msg(rktp, rkm);
+                        rd_kafka_toppar_enq_msg(rktp, rkm, now);
                 }
 
                 rkmessages[i].err = RD_KAFKA_RESP_ERR_NO_ERROR;
@@ -1244,7 +1254,7 @@ int rd_kafka_msg_partitioner(rd_kafka_topic_t *rkt,
                 rkm->rkm_partition = partition;
 
         /* Partition is available: enqueue msg on partition's queue */
-        rd_kafka_toppar_enq_msg(rktp_new, rkm);
+        rd_kafka_toppar_enq_msg(rktp_new, rkm, rd_clock());
         if (do_lock)
                 rd_kafka_topic_rdunlock(rkt);
 
@@ -1560,6 +1570,19 @@ rd_kafka_message_status(const rd_kafka_message_t *rkmessage) {
 }
 
 
+int32_t rd_kafka_message_leader_epoch(const rd_kafka_message_t *rkmessage) {
+        rd_kafka_msg_t *rkm;
+        if (unlikely(!rkmessage->rkt || rd_kafka_rkt_is_lw(rkmessage->rkt) ||
+                     !rkmessage->rkt->rkt_rk ||
+                     rkmessage->rkt->rkt_rk->rk_type != RD_KAFKA_CONSUMER))
+                return -1;
+
+        rkm = rd_kafka_message2msg((rd_kafka_message_t *)rkmessage);
+
+        return rkm->rkm_u.consumer.leader_epoch;
+}
+
+
 void rd_kafka_msgq_dump(FILE *fp, const char *what, rd_kafka_msgq_t *rkmq) {
         rd_kafka_msg_t *rkm;
         int cnt = 0;
@@ -1667,6 +1690,155 @@ void rd_kafka_msgbatch_ready_produce(rd_kafka_msgbatch_t *rkmb) {
 }
 
 
+
+/**
+ * @brief Allow queue wakeups after \p abstime, or when the
+ *        given \p batch_msg_cnt or \p batch_msg_bytes have been reached.
+ *
+ * @param rkmq Queue to monitor and set wakeup parameters on.
+ * @param dest_rkmq Destination queue used to meter current queue depths
+ *                  and oldest message. May be the same as \p rkmq but is
+ *                  typically the rktp_xmit_msgq.
+ * @param next_wakeup If non-NULL: update the caller's next scheduler wakeup
+ *                    according to the wakeup time calculated by this function.
+ * @param now The current time.
+ * @param linger_us The configured queue linger / batching time.
+ * @param batch_msg_cnt Queue threshold before signalling.
+ * @param batch_msg_bytes Queue threshold before signalling.
+ *
+ * @returns true if the wakeup conditions are already met and messages are ready
+ *          to be sent, else false.
+ *
+ * @locks_required rd_kafka_toppar_lock()
+ *
+ *
+ * Producer queue and broker thread wake-up behaviour.
+ *
+ * There are contradicting requirements at play here:
+ *  - Latency: queued messages must be batched and sent according to
+ *             batch size and linger.ms configuration.
+ *  - Wakeups: keep the number of thread wake-ups to a minimum to avoid
+ *             high CPU utilization and context switching.
+ *
+ * The message queue (rd_kafka_msgq_t) has functionality for the writer (app)
+ * to wake up the reader (broker thread) when there's a new message added.
+ * This wakeup is done thru a combination of cndvar signalling and IO writes
+ * to make sure a thread wakeup is triggered regardless if the broker thread
+ * is blocking on cnd_timedwait() or on IO poll.
+ * When the broker thread is woken up it will scan all the partitions it is
+ * the leader for to check if there are messages to be sent - all according
+ * to the configured batch size and linger.ms - and then decide its next
+ * wait time depending on the lowest remaining linger.ms setting of any
+ * partition with messages enqueued.
+ *
+ * This wait time must also be set as a threshold on the message queue, telling
+ * the writer (app) that it must not trigger a wakeup until the wait time
+ * has expired, or the batch sizes have been exceeded.
+ *
+ * The message queue wakeup time is per partition, while the broker thread
+ * wakeup time is the lowest of all its partitions' wakeup times.
+ *
+ * The per-partition wakeup constraints are calculated and set by
+ * rd_kafka_msgq_allow_wakeup_at() which is called from the broker thread's
+ * per-partition handler.
+ * This function is called each time there are changes to the broker-local
+ * partition transmit queue (rktp_xmit_msgq), such as:
+ *  - messages are moved from the partition queue (rktp_msgq) to rktp_xmit_msgq
+ *  - messages are moved to a ProduceRequest
+ *  - messages are timed out from the rktp_xmit_msgq
+ *  - the flushing state changed (rd_kafka_flush() is called or returned).
+ *
+ * If none of these things happen, the broker thread will simply read the
+ * last stored wakeup time for each partition and use that for calculating its
+ * minimum wait time.
+ *
+ *
+ * On the writer side, namely the application calling rd_kafka_produce(), the
+ * followings checks are performed to see if it may trigger a wakeup when
+ * it adds a new message to the partition queue:
+ *  - the current time has reached the wakeup time (e.g., remaining linger.ms
+ *    has expired), or
+ *  - with the new message(s) being added, either the batch.size or
+ *    batch.num.messages thresholds have been exceeded, or
+ *  - the application is calling rd_kafka_flush(),
+ *  - and no wakeup has been signalled yet. This is critical since it may take
+ *    some time for the broker thread to do its work we'll want to avoid
+ *    flooding it with wakeups. So a wakeup is only sent once per
+ *    wakeup period.
+ */
+rd_bool_t rd_kafka_msgq_allow_wakeup_at(rd_kafka_msgq_t *rkmq,
+                                        const rd_kafka_msgq_t *dest_rkmq,
+                                        rd_ts_t *next_wakeup,
+                                        rd_ts_t now,
+                                        rd_ts_t linger_us,
+                                        int32_t batch_msg_cnt,
+                                        int64_t batch_msg_bytes) {
+        int32_t msg_cnt   = rd_kafka_msgq_len(dest_rkmq);
+        int64_t msg_bytes = rd_kafka_msgq_size(dest_rkmq);
+
+        if (RD_KAFKA_MSGQ_EMPTY(dest_rkmq)) {
+                rkmq->rkmq_wakeup.on_first = rd_true;
+                rkmq->rkmq_wakeup.abstime  = now + linger_us;
+                /* Leave next_wakeup untouched since the queue is empty */
+                msg_cnt   = 0;
+                msg_bytes = 0;
+        } else {
+                const rd_kafka_msg_t *rkm = rd_kafka_msgq_first(dest_rkmq);
+
+                rkmq->rkmq_wakeup.on_first = rd_false;
+
+                if (unlikely(rkm->rkm_u.producer.ts_backoff > now)) {
+                        /* Honour retry.backoff.ms:
+                         * wait for backoff to expire */
+                        rkmq->rkmq_wakeup.abstime =
+                            rkm->rkm_u.producer.ts_backoff;
+                } else {
+                        /* Use message's produce() time + linger.ms */
+                        rkmq->rkmq_wakeup.abstime =
+                            rd_kafka_msg_enq_time(rkm) + linger_us;
+                        if (rkmq->rkmq_wakeup.abstime <= now)
+                                rkmq->rkmq_wakeup.abstime = now;
+                }
+
+                /* Update the caller's scheduler wakeup time */
+                if (next_wakeup && rkmq->rkmq_wakeup.abstime < *next_wakeup)
+                        *next_wakeup = rkmq->rkmq_wakeup.abstime;
+
+                msg_cnt   = rd_kafka_msgq_len(dest_rkmq);
+                msg_bytes = rd_kafka_msgq_size(dest_rkmq);
+        }
+
+        /*
+         * If there are more messages or bytes in queue than the batch limits,
+         * or the linger time has been exceeded,
+         * then there is no need for wakeup since the broker thread will
+         * produce those messages as quickly as it can.
+         */
+        if (msg_cnt >= batch_msg_cnt || msg_bytes >= batch_msg_bytes ||
+            (msg_cnt > 0 && now >= rkmq->rkmq_wakeup.abstime)) {
+                /* Prevent further signalling */
+                rkmq->rkmq_wakeup.signalled = rd_true;
+
+                /* Batch is ready */
+                return rd_true;
+        }
+
+        /* If the current msg or byte count is less than the batch limit
+         * then set the rkmq count to the remaining count or size to
+         * reach the batch limits.
+         * This is for the case where the producer is waiting for more
+         * messages to accumulate into a batch. The wakeup should only
+         * occur once a threshold is reached or the abstime has expired.
+         */
+        rkmq->rkmq_wakeup.signalled = rd_false;
+        rkmq->rkmq_wakeup.msg_cnt   = batch_msg_cnt - msg_cnt;
+        rkmq->rkmq_wakeup.msg_bytes = batch_msg_bytes - msg_bytes;
+
+        return rd_false;
+}
+
+
+
 /**
  * @brief Verify order (by msgid) in message queue.
  *        For development use only.
@@ -1740,7 +1912,45 @@ void rd_kafka_msgq_verify_order0(const char *function,
         rd_assert(!errcnt);
 }
 
+rd_kafka_Produce_result_t *rd_kafka_Produce_result_new(int64_t offset,
+                                                       int64_t timestamp) {
+        rd_kafka_Produce_result_t *ret = rd_calloc(1, sizeof(*ret));
+        ret->offset                    = offset;
+        ret->timestamp                 = timestamp;
+        return ret;
+}
 
+void rd_kafka_Produce_result_destroy(rd_kafka_Produce_result_t *result) {
+        if (result->record_errors) {
+                int32_t i;
+                for (i = 0; i < result->record_errors_cnt; i++) {
+                        RD_IF_FREE(result->record_errors[i].errstr, rd_free);
+                }
+                rd_free(result->record_errors);
+        }
+        RD_IF_FREE(result->errstr, rd_free);
+        rd_free(result);
+}
+
+rd_kafka_Produce_result_t *
+rd_kafka_Produce_result_copy(const rd_kafka_Produce_result_t *result) {
+        rd_kafka_Produce_result_t *ret = rd_calloc(1, sizeof(*ret));
+        *ret                           = *result;
+        if (result->errstr)
+                ret->errstr = rd_strdup(result->errstr);
+        if (result->record_errors) {
+                ret->record_errors = rd_calloc(result->record_errors_cnt,
+                                               sizeof(*result->record_errors));
+                int32_t i;
+                for (i = 0; i < result->record_errors_cnt; i++) {
+                        ret->record_errors[i] = result->record_errors[i];
+                        if (result->record_errors[i].errstr)
+                                ret->record_errors[i].errstr =
+                                    rd_strdup(result->record_errors[i].errstr);
+                }
+        }
+        return ret;
+}
 
 /**
  * @name Unit tests
@@ -1870,9 +2080,11 @@ static int unittest_msgq_order(const char *what,
         }
 
         /* Retry the messages, which moves them back to sendq
-         * maintaining the original order */
+         * maintaining the original order with exponential backoff
+         * set to false */
         rd_kafka_retry_msgq(&rkmq, &sendq, 1, 1, 0,
-                            RD_KAFKA_MSG_STATUS_NOT_PERSISTED, cmp);
+                            RD_KAFKA_MSG_STATUS_NOT_PERSISTED, cmp, rd_false, 0,
+                            0);
 
         RD_UT_ASSERT(rd_kafka_msgq_len(&sendq) == 0,
                      "sendq FIFO should be empty, not contain %d messages",
@@ -1910,9 +2122,11 @@ static int unittest_msgq_order(const char *what,
         }
 
         /* Retry the messages, which should now keep the 3 first messages
-         * on sendq (no more retries) and just number 4 moved back. */
+         * on sendq (no more retries) and just number 4 moved back.
+         * No exponential backoff applied. */
         rd_kafka_retry_msgq(&rkmq, &sendq, 1, 1, 0,
-                            RD_KAFKA_MSG_STATUS_NOT_PERSISTED, cmp);
+                            RD_KAFKA_MSG_STATUS_NOT_PERSISTED, cmp, rd_false, 0,
+                            0);
 
         if (fifo) {
                 if (ut_verify_msgq_order("readded #2", &rkmq, 4, 6, rd_true))
@@ -1931,9 +2145,10 @@ static int unittest_msgq_order(const char *what,
                         return 1;
         }
 
-        /* Move all messages back on rkmq */
+        /* Move all messages back on rkmq without any exponential backoff. */
         rd_kafka_retry_msgq(&rkmq, &sendq, 0, 1000, 0,
-                            RD_KAFKA_MSG_STATUS_NOT_PERSISTED, cmp);
+                            RD_KAFKA_MSG_STATUS_NOT_PERSISTED, cmp, rd_false, 0,
+                            0);
 
 
         /* Move first half of messages to sendq (1,2,3).
@@ -1953,11 +2168,14 @@ static int unittest_msgq_order(const char *what,
         rkm                       = ut_rd_kafka_msg_new(msgsize);
         rkm->rkm_u.producer.msgid = i;
         rd_kafka_msgq_enq_sorted0(&rkmq, rkm, cmp);
-
+        /* No exponential backoff applied. */
         rd_kafka_retry_msgq(&rkmq, &sendq, 0, 1000, 0,
-                            RD_KAFKA_MSG_STATUS_NOT_PERSISTED, cmp);
+                            RD_KAFKA_MSG_STATUS_NOT_PERSISTED, cmp, rd_false, 0,
+                            0);
+        /* No exponential backoff applied. */
         rd_kafka_retry_msgq(&rkmq, &sendq2, 0, 1000, 0,
-                            RD_KAFKA_MSG_STATUS_NOT_PERSISTED, cmp);
+                            RD_KAFKA_MSG_STATUS_NOT_PERSISTED, cmp, rd_false, 0,
+                            0);
 
         RD_UT_ASSERT(rd_kafka_msgq_len(&sendq) == 0,
                      "sendq FIFO should be empty, not contain %d messages",

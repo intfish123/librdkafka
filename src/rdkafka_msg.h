@@ -1,7 +1,7 @@
 /*
  * librdkafka - Apache Kafka C library
  *
- * Copyright (c) 2012,2013 Magnus Edenhill
+ * Copyright (c) 2012-2022, Magnus Edenhill
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -65,6 +65,26 @@
 #define RD_KAFKA_MSGSET_V2_ATTR_TRANSACTIONAL (1 << 4)
 #define RD_KAFKA_MSGSET_V2_ATTR_CONTROL       (1 << 5)
 
+/**
+ * @struct Error data for a batch index that caused the batch to be dropped.
+ */
+typedef struct rd_kafka_Produce_result_record_error {
+        int64_t batch_index; /**< Batch index */
+        char *errstr;        /**< Error message for batch_index */
+} rd_kafka_Produce_result_record_error_t;
+
+/**
+ * @struct Result and return values from ProduceResponse
+ */
+typedef struct rd_kafka_Produce_result {
+        int64_t offset;    /**< Assigned offset of first message */
+        int64_t timestamp; /**< (Possibly assigned) offset of first message */
+        char *errstr;      /**< Common error message */
+        rd_kafka_Produce_result_record_error_t
+            *record_errors; /**< Errors for records that caused the batch to be
+                               dropped */
+        int32_t record_errors_cnt; /**< record_errors count */
+} rd_kafka_Produce_result_t;
 
 typedef struct rd_kafka_msg_s {
         rd_kafka_message_t rkm_rkmessage; /* MUST be first field */
@@ -122,6 +142,7 @@ typedef struct rd_kafka_msg_s {
                                               *   identically reconstructed.
                                               */
                         int retries;         /* Number of retries so far */
+                        const char *errstr;  /* Error string for this message */
                 } producer;
 #define rkm_ts_timeout rkm_u.producer.ts_timeout
 #define rkm_ts_enq     rkm_u.producer.ts_enq
@@ -131,6 +152,8 @@ typedef struct rd_kafka_msg_s {
                         rd_kafkap_bytes_t binhdrs; /**< Unparsed
                                                     *   binary headers in
                                                     *   protocol msg */
+                        int32_t leader_epoch;      /**< Leader epoch at the time
+                                                    *   the message was fetched. */
                 } consumer;
         } rkm_u;
 } rd_kafka_msg_t;
@@ -194,6 +217,16 @@ typedef struct rd_kafka_msgq_s {
         struct rd_kafka_msgs_head_s rkmq_msgs; /* TAILQ_HEAD */
         int32_t rkmq_msg_cnt;
         int64_t rkmq_msg_bytes;
+        struct {
+                rd_ts_t abstime; /**< Allow wake-ups after this point in time.*/
+                int32_t msg_cnt; /**< Signal wake-up when this message count
+                                  *   is reached. */
+                int64_t msg_bytes;   /**< .. or when this byte count is
+                                      *   reached. */
+                rd_bool_t on_first;  /**< Wake-up on first message enqueued
+                                      *   regardless of .abstime. */
+                rd_bool_t signalled; /**< Wake-up (already) signalled. */
+        } rkmq_wakeup;
 } rd_kafka_msgq_t;
 
 #define RD_KAFKA_MSGQ_INITIALIZER(rkmq)                                        \
@@ -383,6 +416,43 @@ rd_kafka_msgq_first_msgid(const rd_kafka_msgq_t *rkmq) {
 }
 
 
+
+rd_bool_t rd_kafka_msgq_allow_wakeup_at(rd_kafka_msgq_t *rkmq,
+                                        const rd_kafka_msgq_t *dest_rkmq,
+                                        rd_ts_t *next_wakeup,
+                                        rd_ts_t now,
+                                        rd_ts_t linger_us,
+                                        int32_t batch_msg_cnt,
+                                        int64_t batch_msg_bytes);
+
+/**
+ * @returns true if msgq may be awoken.
+ */
+
+static RD_INLINE RD_UNUSED rd_bool_t
+rd_kafka_msgq_may_wakeup(const rd_kafka_msgq_t *rkmq, rd_ts_t now) {
+        /* No: Wakeup already signalled */
+        if (rkmq->rkmq_wakeup.signalled)
+                return rd_false;
+
+        /* Yes: Wakeup linger time has expired */
+        if (now >= rkmq->rkmq_wakeup.abstime)
+                return rd_true;
+
+        /* Yes: First message enqueued may trigger wakeup */
+        if (rkmq->rkmq_msg_cnt == 1 && rkmq->rkmq_wakeup.on_first)
+                return rd_true;
+
+        /* Yes: batch.size or batch.num.messages exceeded */
+        if (rkmq->rkmq_msg_cnt >= rkmq->rkmq_wakeup.msg_cnt ||
+            rkmq->rkmq_msg_bytes > rkmq->rkmq_wakeup.msg_bytes)
+                return rd_true;
+
+        /* No */
+        return rd_false;
+}
+
+
 /**
  * @brief Message ordering comparator using the message id
  *        number to order messages in ascending order (FIFO).
@@ -526,6 +596,16 @@ static RD_INLINE RD_UNUSED int32_t rd_kafka_seq_wrap(int64_t seq) {
 }
 
 void rd_kafka_msgq_dump(FILE *fp, const char *what, rd_kafka_msgq_t *rkmq);
+
+rd_kafka_Produce_result_t *rd_kafka_Produce_result_new(int64_t offset,
+                                                       int64_t timestamp);
+
+void rd_kafka_Produce_result_destroy(rd_kafka_Produce_result_t *result);
+
+rd_kafka_Produce_result_t *
+rd_kafka_Produce_result_copy(const rd_kafka_Produce_result_t *result);
+
+/* Unit tests */
 
 rd_kafka_msg_t *ut_rd_kafka_msg_new(size_t msgsize);
 void ut_rd_kafka_msgq_purge(rd_kafka_msgq_t *rkmq);

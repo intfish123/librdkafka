@@ -14,7 +14,7 @@ VERSION?=	$(shell python3 packaging/get_version.py src/rdkafka.h)
 BUILD_NUMBER ?= 1
 
 # Skip copyright check in the following paths
-MKL_COPYRIGHT_SKIP?=^(tests|packaging)
+MKL_COPYRIGHT_SKIP?=^(tests|packaging|src/nanopb|src/opentelemetry)
 
 
 .PHONY:
@@ -40,7 +40,7 @@ file-check: CONFIGURATION.md LICENSES.txt examples
 check: file-check
 	@(for d in $(LIBSUBDIRS); do $(MAKE) -C $$d $@ || exit $?; done)
 
-install-subdirs:
+install-subdirs: libs
 	@(for d in $(LIBSUBDIRS); do $(MAKE) -C $$d install || exit $?; done)
 
 install: install-subdirs doc-install
@@ -110,7 +110,15 @@ style-check:
 	@(packaging/tools/style-format.sh \
 		$$(git ls-tree -r --name-only HEAD | egrep '\.(c|cpp|h|py)$$') )
 
+style-check-changed:
+	@(packaging/tools/style-format.sh \
+		$$( (git diff --name-only ; git diff --name-only --staged) | egrep '\.(c|cpp|h|py)$$'))
+
 style-fix:
 	@(packaging/tools/style-format.sh --fix \
 		$$(git ls-tree -r --name-only HEAD | egrep '\.(c|cpp|h|py)$$'))
+
+style-fix-changed:
+	@(packaging/tools/style-format.sh --fix \
+		$$( (git diff --name-only ; git diff --name-only --staged) | egrep '\.(c|cpp|h|py)$$'))
 

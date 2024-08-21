@@ -1,7 +1,7 @@
 /*
  * librdkafka - Apache Kafka C library
  *
- * Copyright (c) 2012-2015 Magnus Edenhill
+ * Copyright (c) 2012-2022, Magnus Edenhill
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -367,9 +367,15 @@ err:
         return -1;
 }
 
-#define rd_read(fd, buf, sz)  recv(fd, buf, sz, 0)
-#define rd_write(fd, buf, sz) send(fd, buf, sz, 0)
-#define rd_close(fd)          closesocket(fd)
+/* Socket IO */
+#define rd_socket_read(fd, buf, sz)  recv(fd, buf, sz, 0)
+#define rd_socket_write(fd, buf, sz) send(fd, buf, sz, 0)
+#define rd_socket_close(fd)          closesocket(fd)
+
+/* File IO */
+#define rd_write(fd, buf, sz)      _write(fd, buf, sz)
+#define rd_open(path, flags, mode) _open(path, flags, mode)
+#define rd_close(fd)               _close(fd)
 
 #endif /* !__cplusplus*/
 

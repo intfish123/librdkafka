@@ -1,7 +1,7 @@
 /*
  * librdkafka - Apache Kafka C library
  *
- * Copyright (c) 2019 Magnus Edenhill
+ * Copyright (c) 2019-2022, Magnus Edenhill
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -79,13 +79,15 @@ typedef struct rd_kafka_coord_req_s {
         rd_kafka_coordtype_t creq_coordtype;         /**< Coordinator type */
         char *creq_coordkey;                         /**< Coordinator key */
 
-        rd_kafka_op_t *creq_rko; /**< Requester's rko that is
-                                  *   provided to creq_send_req_cb
-                                  *   (optional). */
-        rd_ts_t creq_ts_timeout; /**< Absolute timeout.
-                                  *   Will fail with an error
-                                  *   code pertaining to the
-                                  *   current state */
+        rd_kafka_op_t *creq_rko;        /**< Requester's rko that is
+                                         *   provided to creq_send_req_cb
+                                         *   (optional). */
+        rd_kafka_timer_t creq_tmr;      /**< Delay timer. */
+        rd_ts_t creq_ts_timeout;        /**< Absolute timeout.
+                                         *   Will fail with an error
+                                         *   code pertaining to the
+                                         *   current state */
+        rd_interval_t creq_query_intvl; /**< Coord query interval (1s) */
 
         rd_kafka_send_req_cb_t *creq_send_req_cb; /**< Sender callback */
 
@@ -107,6 +109,8 @@ typedef struct rd_kafka_coord_req_s {
                               *   FindCoordinator requests. */
         rd_bool_t creq_done; /**< True if request was sent */
 
+        rd_kafka_broker_t *creq_rkb; /**< creq is waiting for this broker to
+                                      *   come up. */
 } rd_kafka_coord_req_t;
 
 
@@ -115,6 +119,7 @@ void rd_kafka_coord_req(rd_kafka_t *rk,
                         const char *coordkey,
                         rd_kafka_send_req_cb_t *send_req_cb,
                         rd_kafka_op_t *rko,
+                        int delay_ms,
                         int timeout_ms,
                         rd_kafka_replyq_t replyq,
                         rd_kafka_resp_cb_t *resp_cb,

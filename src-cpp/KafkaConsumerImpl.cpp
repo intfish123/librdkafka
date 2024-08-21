@@ -1,7 +1,7 @@
 /*
  * librdkafka - Apache Kafka C/C++ library
  *
- * Copyright (c) 2015 Magnus Edenhill
+ * Copyright (c) 2015-2022, Magnus Edenhill
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -279,6 +279,17 @@ RdKafka::ErrorCode RdKafka::KafkaConsumerImpl::close() {
   return static_cast<RdKafka::ErrorCode>(rd_kafka_consumer_close(rk_));
 }
 
+
+RdKafka::Error *RdKafka::KafkaConsumerImpl::close(Queue *queue) {
+  QueueImpl *queueimpl = dynamic_cast<QueueImpl *>(queue);
+  rd_kafka_error_t *c_error;
+
+  c_error = rd_kafka_consumer_close_queue(rk_, queueimpl->queue_);
+  if (c_error)
+    return new ErrorImpl(c_error);
+
+  return NULL;
+}
 
 
 RdKafka::ConsumerGroupMetadata::~ConsumerGroupMetadata() {

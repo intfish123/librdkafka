@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.2)
+cmake_minimum_required(VERSION 3.5)
 
 include("packaging/cmake/parseversion.cmake")
 parseversion("src/rdkafka.h")
@@ -50,6 +50,19 @@ endif()
 option(WITH_ZLIB "With ZLIB" ${with_zlib_default})
 if(WITH_ZLIB)
   list(APPEND BUILT_WITH "ZLIB")
+endif()
+# }
+
+# CURL {
+find_package(CURL QUIET)
+if(CURL_FOUND)
+  set(with_curl_default ON)
+else()
+  set(with_curl_default OFF)
+endif()
+option(WITH_CURL "With CURL" ${with_curl_default})
+if(WITH_CURL)
+  list(APPEND BUILT_WITH "CURL")
 endif()
 # }
 
@@ -147,6 +160,10 @@ if(WITH_SASL)
   endif()
 endif()
 # }
+
+if(WITH_SSL AND WITH_CURL)
+    set(WITH_OAUTHBEARER_OIDC ON)
+endif()
 
 # LZ4 {
 option(ENABLE_LZ4_EXT "Enable external LZ4 library support" ON)

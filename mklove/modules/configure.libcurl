@@ -22,6 +22,10 @@ function manual_checks {
     mkl_meta_set "libcurl" "apk" "curl-dev curl-static"
     mkl_meta_set "libcurl" "deb" "libcurl4-openssl-dev"
     mkl_meta_set "libcurl" "static" "libcurl.a"
+    if [[ $MKL_DISTRO == "osx" && $WITH_STATIC_LINKING ]]; then
+        mkl_env_append LDFLAGS "-framework CoreFoundation -framework SystemConfiguration"
+        mkl_mkvar_append "libcurl" MKL_PKGCONFIG_LIBS_PRIVATE "-framework CoreFoundation -framework SystemConfiguration"
+    fi
     mkl_lib_check "libcurl" "WITH_CURL" $action CC "-lcurl" \
                   "
 #include <curl/curl.h>
@@ -41,12 +45,24 @@ void foo (void) {
 function install_source {
     local name=$1
     local destdir=$2
-    local ver=7.78.0
+    local ver=8.8.0
+    local checksum="77c0e1cd35ab5b45b659645a93b46d660224d0024f1185e8a95cdb27ae3d787d"
 
     echo "### Installing $name $ver from source to $destdir"
     if [[ ! -f Makefile ]]; then
-        curl -fL https://curl.se/download/curl-${ver}.tar.gz | \
-            tar xzf - --strip-components 1
+        mkl_download_archive \
+            "https://curl.se/download/curl-${ver}.tar.gz" \
+            256 \
+            $checksum || return 1
+    fi
+
+    # curl's configure has a runtime check where a program is built
+    # with all libs linked and then executed, since mklove's destdir
+    # is outside the standard ld.so search path this runtime check will
+    # fail due to missing libraries.
+    # We patch curl's configure file to skip this check altogether.
+    if ! mkl_patch libcurl 0000 ; then
+        return 1
     fi
 
     # Clear out LIBS to not interfer with lib detection process.
@@ -60,7 +76,6 @@ function install_source {
 	--disable-file \
 	--disable-gopher \
 	--disable-imap \
-	--disable-imaps \
 	--disable-mqtt \
 	--disable-pop3 \
 	--disable-rtsp \
@@ -68,13 +83,17 @@ function install_source {
 	--disable-smtp \
 	--disable-telnet \
 	--disable-tftp \
-	--disable-ssh \
 	--disable-manual \
 	--disable-ldap{,s} \
 	--disable-libcurl-option \
         --without-{librtmp,libidn2,winidn,nghttp2,nghttp3,ngtcp2,quiche,brotli} &&
-	time make -j &&
+	time make CPPFLAGS="$CPPFLAGS" -j &&
 	make DESTDIR="${destdir}" prefix=/usr install
+    local ret=$?
 
-    return $?
+    if [[ $MKL_DISTRO == osx ]]; then
+        mkl_mkvar_append "libcurl" LIBS "-framework CoreFoundation -framework SystemConfiguration"
+    fi
+
+    return $ret
 }

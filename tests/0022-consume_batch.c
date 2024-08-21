@@ -1,7 +1,7 @@
 /*
  * librdkafka - Apache Kafka C library
  *
- * Copyright (c) 2012-2015, Magnus Edenhill
+ * Copyright (c) 2012-2022, Magnus Edenhill
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,7 +39,7 @@
  */
 
 
-static int do_test_consume_batch(void) {
+static void do_test_consume_batch(void) {
 #define topic_cnt 2
         char *topics[topic_cnt];
         const int partition_cnt = 2;
@@ -52,6 +52,8 @@ static int do_test_consume_batch(void) {
         int i, p;
         int batch_cnt = 0;
         int remains;
+
+        SUB_TEST();
 
         testid = test_id_generate();
 
@@ -138,18 +140,137 @@ static int do_test_consume_batch(void) {
 
         rd_kafka_destroy(rk);
 
+        SUB_TEST_PASS();
+}
+
+
+#if WITH_SASL_OAUTHBEARER
+/**
+ * @brief Verify that the oauthbearer_refresh_cb() is triggered
+ *        when using consume_batch_queue()  (as opposed to consumer_poll()).
+ */
+
+static rd_bool_t refresh_called = rd_false;
+
+static void
+refresh_cb(rd_kafka_t *rk, const char *oauthbearer_config, void *opaque) {
+        TEST_SAY("Refresh callback called\n");
+        TEST_ASSERT(!refresh_called);
+        refresh_called = rd_true;
+        rd_kafka_oauthbearer_set_token_failure(rk, "Refresh called");
+}
+
+static void do_test_consume_batch_oauthbearer_cb(void) {
+        rd_kafka_t *rk;
+        rd_kafka_conf_t *conf;
+        rd_kafka_queue_t *rkq;
+        rd_kafka_message_t *rkms[1];
+        ssize_t r;
+
+        SUB_TEST_QUICK();
+
+        refresh_called = rd_false;
+
+        conf = rd_kafka_conf_new();
+        test_conf_set(conf, "security.protocol", "sasl_plaintext");
+        test_conf_set(conf, "sasl.mechanism", "OAUTHBEARER");
+        rd_kafka_conf_set_oauthbearer_token_refresh_cb(conf, refresh_cb);
+
+        /* Create simple consumer */
+        rk = test_create_consumer(NULL, NULL, conf, NULL);
+
+        /* Create generic consume queue */
+        rkq = rd_kafka_queue_get_main(rk);
+
+        r = rd_kafka_consume_batch_queue(rkq, 1000, rkms, 1);
+        TEST_ASSERT(r == 0, "Expected return value 0, not %d", (int)r);
+
+        TEST_SAY("refresh_called = %d\n", refresh_called);
+        TEST_ASSERT(refresh_called,
+                    "Expected refresh callback to have been called");
+
+        rd_kafka_queue_destroy(rkq);
+
+        rd_kafka_destroy(rk);
+}
+#endif
+
+
+/**
+ * @brief Subscribe to a non-existent topic with rd_kafka_consume_batch_queue.
+ *        Verify that a rkmessage with error code ERR_UNKNOWN_TOPIC_OR_PART
+ *        is received.
+ */
+static void do_test_consume_batch_non_existent_topic(void) {
+
+        char *topic = "non-existent";
+        rd_kafka_t *rk;
+        rd_kafka_topic_partition_list_t *rktpars;
+        rd_kafka_queue_t *rkq;
+        rd_kafka_message_t *rkms[1];
+        rd_kafka_conf_t *conf;
+        ssize_t consumed = 0;
+
+        SUB_TEST_QUICK();
+
+        test_conf_init(&conf, NULL, 30);
+        test_conf_set(conf, "allow.auto.create.topics", "false");
+        test_conf_set(conf, "group.id", "test1");
+
+        /* Create simple consumer */
+        rk = test_create_consumer(NULL, NULL, conf, NULL);
+
+        /* Subscribe to the input topic */
+        rktpars = rd_kafka_topic_partition_list_new(1);
+        rd_kafka_topic_partition_list_add(rktpars, topic,
+                                          /* The partition is ignored in
+                                           * rd_kafka_subscribe() */
+                                          RD_KAFKA_PARTITION_UA);
+
+        rd_kafka_subscribe(rk, rktpars);
+        rd_kafka_topic_partition_list_destroy(rktpars);
+
+        /* Create generic consume queue */
+        rkq = rd_kafka_queue_get_consumer(rk);
+
+        TEST_SAY("Consuming from non-existent topic\n");
+        while ((consumed = rd_kafka_consume_batch_queue(rkq, 1000, rkms, 1)) !=
+               1) {
+                TEST_SAY("Consuming from non-existent topic\n");
+        }
+
+        TEST_ASSERT(rkms[0]->err == RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART,
+                    "Expected ERR_UNKNOWN_TOPIC_OR_PART, not %s: %s",
+                    rd_kafka_err2str(rkms[0]->err),
+                    rd_kafka_message_errstr(rkms[0]));
+        TEST_SAY("Received ERR_UNKNOWN_TOPIC_OR_PART\n");
+
+        TEST_SAY("Stopping consumer\n");
+
+        rd_kafka_message_destroy(rkms[0]);
+
+        rd_kafka_queue_destroy(rkq);
+
+        rd_kafka_destroy(rk);
+
+        SUB_TEST_PASS();
+}
+
+
+int main_0022_consume_batch(int argc, char **argv) {
+        do_test_consume_batch();
+        if (test_consumer_group_protocol_generic()) {
+                do_test_consume_batch_non_existent_topic();
+        }
         return 0;
 }
 
 
-
-int main_0022_consume_batch(int argc, char **argv) {
-        int fails = 0;
-
-        fails += do_test_consume_batch();
-
-        if (fails > 0)
-                TEST_FAIL("See %d previous error(s)\n", fails);
-
+int main_0022_consume_batch_local(int argc, char **argv) {
+#if WITH_SASL_OAUTHBEARER
+        do_test_consume_batch_oauthbearer_cb();
+#else
+        TEST_SKIP("No OAUTHBEARER support\n");
+#endif
         return 0;
 }

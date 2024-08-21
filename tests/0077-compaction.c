@@ -1,7 +1,7 @@
 /*
  * librdkafka - Apache Kafka C library
  *
- * Copyright (c) 2012-2015, Magnus Edenhill
+ * Copyright (c) 2012-2022, Magnus Edenhill
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -190,7 +190,8 @@ static void do_test_compaction(int msgs_per_key, const char *compression) {
             "--config segment.bytes=10000 "
             "--config min.cleanable.dirty.ratio=0.01 "
             "--config delete.retention.ms=86400 "
-            "--config file.delete.delay.ms=10000",
+            "--config file.delete.delay.ms=10000 "
+            "--config max.compaction.lag.ms=100",
             topic, partition + 1);
 
         test_conf_init(&conf, NULL, 120);
@@ -326,6 +327,11 @@ int main_0077_compaction(int argc, char **argv) {
 
         if (!test_can_create_topics(1))
                 return 0;
+
+        if (test_needs_auth()) {
+                TEST_SKIP("Test cluster requires authentication/SSL\n");
+                return 0;
+        }
 
         do_test_compaction(10, NULL);
 

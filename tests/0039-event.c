@@ -1,7 +1,7 @@
 /*
  * librdkafka - Apache Kafka C library
  *
- * Copyright (c) 2012-2013, Magnus Edenhill
+ * Copyright (c) 2012-2022, Magnus Edenhill
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -190,7 +190,7 @@ int main_0039_event_log(int argc, char **argv) {
         /* Create kafka instance */
         rk     = test_create_handle(RD_KAFKA_PRODUCER, conf);
         eventq = rd_kafka_queue_get_main(rk);
-        rd_kafka_set_log_queue(rk, eventq);
+        TEST_CALL_ERR__(rd_kafka_set_log_queue(rk, eventq));
 
         while (waitevent) {
                 /* reset ctx */

@@ -4,7 +4,7 @@
 mkl_meta_set "description" "name"      "librdkafka"
 mkl_meta_set "description" "oneline"   "The Apache Kafka C/C++ library"
 mkl_meta_set "description" "long"      "Full Apache Kafka protocol support, including producer and consumer"
-mkl_meta_set "description" "copyright" "Copyright (c) 2012-2019 Magnus Edenhill"
+mkl_meta_set "description" "copyright" "Copyright (c) 2012-2022, Magnus Edenhill, 2023, Confluent Inc."
 
 # Enable generation of pkg-config .pc file
 mkl_mkvar_set "" GEN_PKG_CONFIG y
@@ -34,7 +34,7 @@ mkl_toggle_option "Development" ENABLE_VALGRIND "--enable-valgrind" "Enable in-c
 
 mkl_toggle_option "Development" ENABLE_REFCNT_DEBUG "--enable-refcnt-debug" "Enable refcnt debugging" "n"
 
-mkl_toggle_option "Feature" ENABLE_LZ4_EXT "--enable-lz4-ext" "Enable external LZ4 library support (builtin version 1.9.2)" "y"
+mkl_toggle_option "Feature" ENABLE_LZ4_EXT "--enable-lz4-ext" "Enable external LZ4 library support (builtin version 1.9.4)" "y"
 mkl_toggle_option "Feature" ENABLE_LZ4_EXT "--enable-lz4" "Deprecated: alias for --enable-lz4-ext" "y"
 
 mkl_toggle_option "Feature" ENABLE_REGEX_EXT "--enable-regex-ext" "Enable external (libc) regex (else use builtin)" "y"
@@ -146,6 +146,10 @@ void foo (void) {
         # SASL OAUTHBEARER's default unsecured JWS implementation
         # requires base64 encoding from OpenSSL
         mkl_allvar_set WITH_SASL_OAUTHBEARER WITH_SASL_OAUTHBEARER y
+
+        if [[ $WITH_CURL == y ]]; then
+            mkl_allvar_set WITH_OAUTHBEARER_OIDC WITH_OAUTHBEARER_OIDC y
+        fi
     fi
 
     # CRC32C: check for crc32 instruction support.

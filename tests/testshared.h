@@ -1,7 +1,7 @@
 /*
  * librdkafka - Apache Kafka C library
  *
- * Copyright (c) 2012-2015, Magnus Edenhill
+ * Copyright (c) 2012-2022, Magnus Edenhill
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -364,7 +364,7 @@ int test_sub_start(const char *func,
                    const char *fmt,
                    ...);
 void test_sub_pass(void);
-void test_sub_skip(const char *fmt, ...);
+void test_sub_skip(const char *fmt, ...) RD_FORMAT(printf, 1, 2);
 
 #define SUB_TEST0(IS_QUICK, ...)                                               \
         do {                                                                   \
